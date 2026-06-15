@@ -1,0 +1,30 @@
+Deploy Shelfside to Netlify (2 minutes)
+======================================
+
+IMPORTANT: Use shelfside-netlify.zip (v2.3) — NOT the older files.zip.
+
+Option A — Drag & drop (easiest)
+1. Open https://app.netlify.com/drop in your browser
+2. Drag shelfside-netlify.zip from:
+   C:\Users\junip\OneDrive\Desktop\bookapp\
+3. Netlify gives you a live URL (e.g. random-name.netlify.app)
+4. Open that URL on your phone → Add to Home Screen
+5. Settings → About shows "v2.3"
+6. Settings → Install app — confirms browser vs installed app
+7. iPhone: Share → Add to Home Screen (required for PWA on iOS)
+8. Delete OLD home-screen icon before adding again after redeploy
+
+Option B — Netlify dashboard
+1. https://app.netlify.com → Add new site → Deploy manually
+2. Drag shelfside-netlify.zip onto the upload area
+
+What's in the deploy package
+- index.html (the whole app)
+- sw.js, manifest.webmanifest, icons/
+- netlify.toml (optional headers; no build step)
+
+No npm install. No build command. Static files only.
+
+After deploy
+- Site must be HTTPS (Netlify does this automatically)
+- EPUB/PDF import loads JSZip/PDF.js from CDN on first use (needs internet once)
