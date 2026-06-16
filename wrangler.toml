@@ -3,7 +3,7 @@ compatibility_date = "2024-06-01"
 pages_build_output_dir = "."
 
 # Hosted share storage (bind same name in Cloudflare Pages → Settings → Functions).
-# Replace id with your KV namespace ID from the dashboard (see CLOUDFLARE.txt).
+# See CLOUDFLARE.txt for dashboard setup notes.
 [[kv_namespaces]]
 binding = "SHELFSIDE_SHARE"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "a36aaede681a4425862b180ae90dfa49"
