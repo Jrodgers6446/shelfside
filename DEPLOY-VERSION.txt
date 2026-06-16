@@ -1,2 +1,2 @@
-Shelfside v2.17.0
-Comic URL import + image import fixes
+Shelfside v2.17.1
+Share feature crash fix — safe large-payload handling

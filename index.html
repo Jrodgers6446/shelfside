@@ -422,7 +422,7 @@ async function assignBooksToFolder(ids, folder){
   }
   return n;
 }
-async function buildLibraryBackup(ids = null){
+async function buildShareData(ids = null){
   let all = await dbAll("books");
   if(ids?.length) all = all.filter(b => ids.includes(b.id));
   const items = [];
@@ -456,10 +456,13 @@ async function buildLibraryBackup(ids = null){
   const filename = ids?.length === 1
     ? "shelfside-" + safeFilename(all[0]?.title) + ".json"
     : "shelfside-library-" + new Date().toISOString().slice(0, 10) + ".json";
-  const blob = new Blob([JSON.stringify({
-    shelfside: 2, exported: Date.now(), origin: location.origin, app: APP_VERSION, books: items
-  })], { type: "application/json" });
-  return { blob, count: items.length, filename };
+  const data = { shelfside: 2, exported: Date.now(), origin: location.origin, app: APP_VERSION, books: items };
+  return { data, count: items.length, filename };
+}
+async function buildLibraryBackup(ids = null){
+  const { data, count, filename } = await buildShareData(ids);
+  const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
+  return { blob, count, filename };
 }
 async function exportLibraryBackup(ids = null){
   const { blob, filename } = await buildLibraryBackup(ids);
@@ -472,12 +475,23 @@ async function exportLibraryBackup(ids = null){
 async function shareLibraryBackup(ids = null){
   await shareLibraryAsText(ids);
 }
+const MAX_SHARE_LINK_LEN = 12000;
+const MAX_SHARE_CODE_RAW = 8000;
+const MAX_SHARE_CODE_DOM = 240;
+function shareCodePreview(code, max = MAX_SHARE_CODE_DOM){
+  const s = String(code || "");
+  if(s.length <= max) return s;
+  return s.slice(0, max) + "… (" + s.length.toLocaleString() + " chars — tap Copy)";
+}
 async function encodeShelfShare(data){
-  const json = JSON.stringify(data);
-  if(typeof CompressionStream !== "undefined"){
-    const buf = await new Response(new Blob([json]).stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer();
-    return "S1." + bufToB64url(buf);
-  }
+  let json;
+  try{ json = JSON.stringify(data); }catch(e){ throw new Error("encode"); }
+  try{
+    if(typeof CompressionStream !== "undefined"){
+      const buf = await new Response(new Blob([json]).stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer();
+      return "S1." + bufToB64url(buf);
+    }
+  }catch(e){}
   return "S0." + bufToB64url(new TextEncoder().encode(json));
 }
 async function decodeShelfShare(code){
@@ -542,64 +556,94 @@ function dismissPendingTextShare(){
 async function sharePreviewThumbs(books){
   const thumbs = [];
   for(const item of books.slice(0, 12)){
-    const meta = item.meta || item;
-    if(meta.type === "comic"){
-      const page = item.pages?.[0];
-      if(page?.data){
-        const bytes = typeof page.data === "string" ? b64ToBuf(page.data) : page.data;
-        const blob = new Blob([bytes], { type: guessImageType(page.name, page.type) });
-        thumbs.push(`<img class="share-thumb" src="${URL.createObjectURL(blob)}" alt="">`);
-        continue;
+    try{
+      const meta = item.meta || item;
+      if(meta.type === "comic"){
+        const page = item.pages?.[0];
+        if(page?.data){
+          const bytes = typeof page.data === "string" ? b64ToBuf(page.data) : page.data;
+          if(bytes?.byteLength){
+            const blob = new Blob([bytes], { type: guessImageType(page.name, page.type) });
+            thumbs.push(`<img class="share-thumb" src="${URL.createObjectURL(blob)}" alt="">`);
+            continue;
+          }
+        }
+        if(meta.id){
+          const c = await dbGet("content", meta.id);
+          const b = c?.pages?.length ? pageToBlob(c.pages[0]) : null;
+          if(b){ thumbs.push(`<img class="share-thumb" src="${URL.createObjectURL(b)}" alt="">`); continue; }
+        }
+        thumbs.push(`<div class="share-thumb text-thumb" style="background:${coverColor(meta.title)}">Comic</div>`);
+      }else{
+        thumbs.push(`<div class="share-thumb text-thumb" style="background:${coverColor(meta.title)}">${esc(meta.title).slice(0, 24)}</div>`);
       }
-      const c = await dbGet("content", meta.id);
-      const b = c?.pages?.length ? pageToBlob(c.pages[0]) : null;
-      if(b) thumbs.push(`<img class="share-thumb" src="${URL.createObjectURL(b)}" alt="">`);
-      else thumbs.push(`<div class="share-thumb text-thumb" style="background:${coverColor(meta.title)}">Comic</div>`);
-    }else{
-      thumbs.push(`<div class="share-thumb text-thumb" style="background:${coverColor(meta.title)}">${esc(meta.title).slice(0, 24)}</div>`);
+    }catch(e){
+      thumbs.push(`<div class="share-thumb text-thumb" style="background:var(--slate)">?</div>`);
     }
   }
   return thumbs.join("");
 }
 async function shareLibraryAsText(ids = null){
-  const { blob, count } = await buildLibraryBackup(ids);
-  const data = JSON.parse(await blob.text());
-  const code = await encodeShelfShare(data);
-  const link = `${location.origin}${location.pathname}?shelf=${encodeURIComponent(code)}`;
-  const linkOk = link.length < 12000;
+  let data, count, code, link, linkOk;
+  try{
+    const built = await buildShareData(ids);
+    data = built.data;
+    count = built.count;
+    code = await encodeShelfShare(data);
+    linkOk = code.length <= MAX_SHARE_CODE_RAW;
+    link = "";
+    if(linkOk){
+      link = `${location.origin}${location.pathname}?shelf=${encodeURIComponent(code)}`;
+      if(link.length >= MAX_SHARE_LINK_LEN){ linkOk = false; link = ""; }
+    }
+  }catch(e){
+    if(e?.message === "empty") throw e;
+    toast("Couldn't prepare share — shelf may be too large");
+    throw e;
+  }
   const msg = `${count} book${count > 1 ? "s" : ""} from Shelfside — tap the link to add them to your shelf:`;
-  const previews = await sharePreviewThumbs(data.books);
+  let previews = "";
+  try{ previews = await sharePreviewThumbs(data.books); }catch(e){}
+  const codePreview = shareCodePreview(code);
+  const sizeHint = code.length > MAX_SHARE_CODE_RAW ? ` (${Math.round(code.length / 1024)} KB)` : "";
   openSheet("Share shelf as text", `
     <p class="hint" style="margin:0 0 6px">Includes text <b>and comic images</b>. No server needed — send the link or text below.</p>
     <div class="share-preview">${previews}${count > 12 ? `<div class="share-thumb text-thumb" style="background:var(--slate)">+${count - 12}</div>` : ""}</div>
     ${linkOk ? `<p class="hint"><b>Share link</b> — friend taps it, then Import:</p>
-      <input readonly id="shareLink" value="${esc(link)}" style="width:100%;padding:12px;border:1px solid var(--line);border-radius:10px;font-size:12px" onclick="this.select()">
+      <input readonly id="shareLink" style="width:100%;padding:12px;border:1px solid var(--line);border-radius:10px;font-size:12px" onclick="this.select()">
       <button class="btn green" id="shareCopyLink" style="margin-top:8px">Copy link</button>` :
-      `<p class="hint" style="color:#9A3B3B">Shelf is large (comics) — use <b>Copy share text</b> and send via Messages/WhatsApp instead of a link.</p>`}
+      `<p class="hint" style="color:#9A3B3B">Shelf is too large for a link${sizeHint} — use <b>Copy share text</b> and send via Messages/WhatsApp.</p>`}
     <p class="hint" style="margin-top:12px"><b>Share text</b> — paste in Import shared shelf:</p>
-    <div class="share-code" id="shareCode">${esc(code)}</div>
+    <div class="share-code" id="shareCode">${esc(codePreview)}</div>
     <button class="btn ghost" id="shareCopyText">Copy share text</button>
     <button class="btn ghost" id="shareNative" style="margin-top:8px">Send via Messages / WhatsApp</button>
     <button class="btn ghost" id="igDone" style="margin-top:12px">Done</button>
   `, body => {
+    if(linkOk && link){
+      const linkEl = body.querySelector("#shareLink");
+      if(linkEl) linkEl.value = link;
+    }
     body.querySelector("#shareCopyLink")?.addEventListener("click", async () => {
+      if(!link) return;
       try{
         await navigator.clipboard.writeText(link);
         toast("Link copied");
       }catch(e){
-        body.querySelector("#shareLink")?.select();
+        const linkEl = body.querySelector("#shareLink");
+        linkEl?.focus();
+        linkEl?.select();
         toast("Select and copy the link");
       }
     });
     body.querySelector("#shareCopyText")?.addEventListener("click", async () => {
-      const text = linkOk ? `${msg}\n${link}` : code;
+      const text = linkOk && link ? `${msg}\n${link}` : code;
       try{
         await navigator.clipboard.writeText(text);
         toast("Share text copied");
-      }catch(e){ toast("Couldn't copy — select the text box"); }
+      }catch(e){ toast("Couldn't copy — try Send via Messages"); }
     });
     body.querySelector("#shareNative")?.addEventListener("click", async () => {
-      const text = linkOk ? `${msg}\n${link}` : `${msg}\n\n${code}`;
+      const text = linkOk && link ? `${msg}\n${link}` : `${msg}\n\n${code}`;
       if(navigator.share){
         try{
           await navigator.share({ title: "My Shelfside shelf", text });
@@ -791,7 +835,7 @@ function htmlToText(html){
   const text = (doc.body?.innerText || doc.documentElement.textContent || "");
   return text.replace(/\n{3,}/g, "\n\n").trim();
 }
-const APP_VERSION = "2.17.0";
+const APP_VERSION = "2.17.1";
 const MAX_COMIC_PAGES = 1000;
 const DB_NAME = "shelfside";
 const DB_VERSION = 1;
