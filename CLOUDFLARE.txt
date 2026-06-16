@@ -1,0 +1,40 @@
+SHELFSIDE — CLOUDFLARE PAGES KV (hosted share)
+=============================================
+
+Large shelf shares are stored in Cloudflare KV for 7 days via /api/share-shelf.
+You must bind a KV namespace in production or uploads return 503.
+
+ONE-TIME SETUP (Cloudflare Dashboard)
+-------------------------------------
+1. Workers & Pages → KV → Create namespace
+   Name: shelfside-share (or any label)
+
+2. Workers & Pages → your Shelfside Pages project → Settings → Functions
+   → KV namespace bindings → Add binding
+   - Variable name: SHELFSIDE_SHARE  (must match exactly)
+   - KV namespace: pick the namespace from step 1
+
+3. Redeploy (or push to main — Cloudflare auto-deploys)
+
+OPTIONAL — wrangler.toml (local dev)
+------------------------------------
+After creating the namespace, copy its ID into wrangler.toml:
+
+  [[kv_namespaces]]
+  binding = "SHELFSIDE_SHARE"
+  id = "YOUR_KV_NAMESPACE_ID"
+
+Then: npx wrangler pages dev .
+
+Without KV, link import (/api/fetch-url) still works; hosted share upload does not.
+
+VERIFY
+------
+POST a small test shelf from the app (Share shelf with comics).
+Copy link should look like: https://YOUR-SITE.pages.dev/?share=abc123xyz0
+Opening that link shows Import banner; GET works:
+  https://YOUR-SITE.pages.dev/api/share-shelf?id=abc123xyz0&download=1
+
+FREE TIER
+---------
+KV: 25 MB max per value (enough for most libraries), 100k reads/day.

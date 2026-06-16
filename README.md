@@ -7,7 +7,7 @@ Installable reading app. Single-page PWA — static files + one Cloudflare Pages
 - **Library** — bookshelf, folders, tags, reading progress
 - **Discover** — Project Gutenberg via Gutendex
 - **Create** — paste text, import files, fetch links (Wattpad, Literotica, Gutenberg, Wayback Machine), comics
-- **Share** — text/link share with comics embedded (no server storage needed)
+- **Share** — small shelves: inline link/text; large shelves & comics: hosted download link (7 days, KV)
 - **Reader** — themes, font size, read-aloud, offline
 
 ## Deploy on Cloudflare Pages
@@ -21,7 +21,7 @@ Installable reading app. Single-page PWA — static files + one Cloudflare Pages
    - **Build output directory:** `/` (repo root)
 5. **Save and Deploy**
 
-Cloudflare auto-deploys `functions/` — link import uses `/api/fetch-url`.
+Cloudflare auto-deploys `functions/` — link import uses `/api/fetch-url`, hosted share uses `/api/share-shelf` (requires KV binding — see **CLOUDFLARE.txt**).
 
 ### After deploy
 
@@ -47,6 +47,8 @@ sw.js
 manifest.webmanifest
 icons/                    PWA install (required)
 functions/api/fetch-url.js   Cloudflare Pages Function
+functions/api/share-shelf.js   Hosted share storage (KV)
+CLOUDFLARE.txt                KV binding setup for hosted share
 _headers                  cache headers (Cloudflare + Netlify)
 ```
 

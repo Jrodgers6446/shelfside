@@ -1,2 +1,2 @@
-Shelfside v2.17.1
-Share feature crash fix — safe large-payload handling
+Shelfside v2.18.0
+Hosted share links for large libraries (KV-backed, 7-day expiry)

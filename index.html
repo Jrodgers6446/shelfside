@@ -483,6 +483,70 @@ function shareCodePreview(code, max = MAX_SHARE_CODE_DOM){
   if(s.length <= max) return s;
   return s.slice(0, max) + "… (" + s.length.toLocaleString() + " chars — tap Copy)";
 }
+function shelfNeedsHostedShare(data, code){
+  const hasComics = (data.books || []).some(item => (item.meta || item).type === "comic");
+  return hasComics || String(code || "").length > MAX_SHARE_CODE_RAW;
+}
+async function uploadHostedShare(data){
+  const json = JSON.stringify(data);
+  const headers = { "Content-Type": "application/json" };
+  let body = json;
+  if(json.length > 50000 && typeof CompressionStream !== "undefined"){
+    const gz = await new Response(new Blob([json]).stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer();
+    body = gz;
+    headers["Content-Encoding"] = "gzip";
+  }
+  const r = await fetch("/api/share-shelf", { method: "POST", headers, body });
+  if(r.status === 503) throw new Error("nokv");
+  if(r.status === 413) throw new Error("toobig");
+  if(!r.ok) throw new Error("upload");
+  return r.json();
+}
+async function importFromHostedShare(id){
+  id = String(id || "").toLowerCase();
+  if(!/^[a-z0-9]{6,12}$/.test(id)) throw new Error("noid");
+  dismissPendingHostedShare();
+  dismissPendingFriend();
+  const r = await fetch(`/api/share-shelf?id=${encodeURIComponent(id)}`);
+  if(r.status === 404) throw new Error("missing");
+  if(!r.ok) throw new Error("fetch");
+  const data = await r.json();
+  if(!Array.isArray(data?.books) || !data.books.length) throw new Error("empty");
+  const file = new File([JSON.stringify(data)], "shelfside-share.json", { type: "application/json" });
+  const n = await importLibraryBackup(file);
+  dismissPendingTextShare();
+  return n;
+}
+function parseHostedShareId(raw){
+  const s = String(raw || "").trim();
+  const m = s.match(/[?&#]share=([a-z0-9]{6,12})/i)
+    || s.match(/[?&#]friend=([a-z0-9]{6,12})/i)
+    || s.match(/share-shelf\?[^#]*\bid=([a-z0-9]{6,12})/i)
+    || s.match(/^([a-z0-9]{6,12})$/i);
+  return m ? (m[1] || m[0]).toLowerCase() : "";
+}
+function captureHostedShareLink(){
+  try{
+    const params = new URLSearchParams(location.search);
+    const share = (params.get("share") || "").toLowerCase();
+    if(share && /^[a-z0-9]{6,12}$/.test(share)){
+      sessionStorage.setItem("shelfside.pendingHostedShare", share);
+      history.replaceState({}, "", location.pathname + location.hash);
+      return;
+    }
+    const friend = (params.get("friend") || "").toLowerCase();
+    if(friend && /^[a-z0-9]{6,12}$/.test(friend)){
+      sessionStorage.setItem("shelfside.pendingHostedShare", friend);
+      history.replaceState({}, "", location.pathname + location.hash);
+    }
+  }catch(e){}
+}
+function getPendingHostedShare(){
+  try{ return sessionStorage.getItem("shelfside.pendingHostedShare") || ""; }catch(e){ return ""; }
+}
+function dismissPendingHostedShare(){
+  try{ sessionStorage.removeItem("shelfside.pendingHostedShare"); }catch(e){}
+}
 async function encodeShelfShare(data){
   let json;
   try{ json = JSON.stringify(data); }catch(e){ throw new Error("encode"); }
@@ -583,6 +647,65 @@ async function sharePreviewThumbs(books){
   }
   return thumbs.join("");
 }
+async function shareLibraryHosted(data, count){
+  const msg = `${count} book${count > 1 ? "s" : ""} from Shelfside — tap the link to add them to your shelf:`;
+  let previews = "";
+  try{ previews = await sharePreviewThumbs(data.books); }catch(e){}
+  openSheet("Share shelf", `
+    <p class="hint" style="margin:0 0 6px">Large shelf — creating a download link (stored 7 days, includes comics).</p>
+    <div class="share-preview">${previews}${count > 12 ? `<div class="share-thumb text-thumb" style="background:var(--slate)">+${count - 12}</div>` : ""}</div>
+    <div id="hostedShareStatus" style="text-align:center;padding:16px"><span class="hint">Uploading…</span></div>
+    <button class="btn ghost" id="igDone" style="margin-top:12px">Cancel</button>
+  `);
+  let result;
+  try{
+    result = await uploadHostedShare(data);
+  }catch(e){
+    const errMsg = e?.message === "nokv" ? "Share storage not configured on server — see CLOUDFLARE.txt, or use Settings → Export backup."
+      : e?.message === "toobig" ? "Shelf is too large to upload (max ~20 MB)."
+      : "Upload failed — check connection and try again";
+    const statusEl = $("#hostedShareStatus");
+    if(statusEl) statusEl.innerHTML = `<p class="hint" style="color:#9A3B3B">${esc(errMsg)}</p>`;
+    toast(errMsg);
+    return;
+  }
+  const { shareUrl, downloadUrl, expiresDays } = result;
+  const statusEl = $("#hostedShareStatus");
+  if(!statusEl) return;
+  statusEl.innerHTML = `
+    <p class="hint"><b>Share link</b> — friend taps it, then Import. Expires in ${expiresDays || 7} days.</p>
+    <input readonly id="shareLink" style="width:100%;padding:12px;border:1px solid var(--line);border-radius:10px;font-size:12px" onclick="this.select()" value="${esc(shareUrl)}">
+    <button class="btn green" id="shareCopyLink" style="margin-top:8px">Copy link</button>
+    <p class="hint" style="margin-top:12px">Or <a href="${esc(downloadUrl)}" target="_blank" rel="noopener">download .json</a> and send the file.</p>
+    <button class="btn ghost" id="shareNative" style="margin-top:8px">Send via Messages / WhatsApp</button>
+  `;
+  $("#shareCopyLink")?.addEventListener("click", async () => {
+    try{
+      await navigator.clipboard.writeText(shareUrl);
+      toast("Link copied");
+    }catch(e){
+      const linkEl = $("#shareLink");
+      linkEl?.focus();
+      linkEl?.select();
+      toast("Select and copy the link");
+    }
+  });
+  $("#shareNative")?.addEventListener("click", async () => {
+    const text = `${msg}\n${shareUrl}`;
+    if(navigator.share){
+      try{
+        await navigator.share({ title: "My Shelfside shelf", text, url: shareUrl });
+        toast("Sent!");
+        return;
+      }catch(e){ if(e?.name === "AbortError") return; }
+    }
+    try{
+      await navigator.clipboard.writeText(text);
+      toast("Copied — paste in Messages or WhatsApp");
+    }catch(e){ toast("Use Copy link instead"); }
+  });
+  toast("Share link ready");
+}
 async function shareLibraryAsText(ids = null){
   let data, count, code, link, linkOk;
   try{
@@ -590,6 +713,7 @@ async function shareLibraryAsText(ids = null){
     data = built.data;
     count = built.count;
     code = await encodeShelfShare(data);
+    if(shelfNeedsHostedShare(data, code)) return shareLibraryHosted(data, count);
     linkOk = code.length <= MAX_SHARE_CODE_RAW;
     link = "";
     if(linkOk){
@@ -660,32 +784,35 @@ async function shareLibraryAsText(ids = null){
   toast(linkOk ? "Share link ready" : "Share text ready (shelf too big for link)");
 }
 function captureFriendLink(){
-  const params = new URLSearchParams(location.search);
-  const friend = (params.get("friend") || "").toLowerCase();
-  if(friend && /^[a-z0-9]{6,12}$/.test(friend)){
-    try{ sessionStorage.setItem("shelfside.pendingFriend", friend); }catch(e){}
-    history.replaceState({}, "", location.pathname + location.hash);
-  }
+  captureHostedShareLink();
 }
 function getPendingFriendId(){
-  try{ return sessionStorage.getItem("shelfside.pendingFriend") || ""; }catch(e){ return ""; }
+  return getPendingHostedShare();
 }
 function dismissPendingFriend(){
-  try{ sessionStorage.removeItem("shelfside.pendingFriend"); }catch(e){}
+  dismissPendingHostedShare();
 }
 function parseFriendId(raw){
-  const s = String(raw || "").trim();
-  const m = s.match(/[?&]friend=([a-z0-9]{6,12})/i) || s.match(/^([a-z0-9]{6,12})$/i);
-  return m ? (m[1] || m[0]).toLowerCase() : "";
+  return parseHostedShareId(raw);
 }
 async function importFromFriend(id){
-  id = parseFriendId(id) || getPendingFriendId();
+  id = parseHostedShareId(id) || parseFriendId(id) || getPendingHostedShare() || getPendingFriendId();
   if(!id) throw new Error("noid");
-  dismissPendingFriend();
-  throw new Error("legacy");
+  return importFromHostedShare(id);
 }
 function friendBannerHtml(){
+  const hostedId = getPendingHostedShare();
   const textCode = getPendingTextShare();
+  if(hostedId){
+    return `<section class="card friend-banner" id="hostedShareBanner">
+      <div style="padding:14px 16px">
+        <p style="font-family:var(--display);font-weight:600;font-size:17px;margin-bottom:6px">A friend shared their shelf</p>
+        <p class="hint" style="margin-bottom:12px">Tap below to copy their books (text + comics) onto <b>your</b> device.</p>
+        <button class="btn green" id="hostedShareImport">Import shared shelf</button>
+        <button class="btn ghost" id="hostedShareDismiss" style="margin-top:8px">Not now</button>
+      </div>
+    </section>`;
+  }
   if(textCode){
     return `<section class="card friend-banner" id="textShareBanner">
       <div style="padding:14px 16px">
@@ -696,17 +823,23 @@ function friendBannerHtml(){
       </div>
     </section>`;
   }
-  if(!getPendingFriendId()) return "";
-  return `<section class="card friend-banner">
-    <div style="padding:14px 16px">
-      <p style="font-family:var(--display);font-weight:600;font-size:17px;margin-bottom:6px">A friend shared their shelf</p>
-      <p class="hint" style="margin-bottom:12px">This is <b>your own</b> Shelfside — tap below to copy their books onto your device.</p>
-      <button class="btn green" id="friendImport">Import from friend</button>
-      <button class="btn ghost" id="friendDismiss" style="margin-top:8px">Not now</button>
-    </div>
-  </section>`;
+  return "";
 }
 function wireFriendBanner(){
+  $("#hostedShareImport")?.addEventListener("click", async () => {
+    const btn = $("#hostedShareImport");
+    const prev = btn.textContent;
+    btn.textContent = "Importing…"; btn.disabled = true;
+    try{
+      const n = await importFromHostedShare(getPendingHostedShare());
+      toast(`Added ${n} book${n > 1 ? "s" : ""} to your shelf`);
+      renderLibrary();
+    }catch(e){
+      toast(e?.message === "missing" ? "Link expired or not found" : "Import failed");
+      btn.textContent = prev; btn.disabled = false;
+    }
+  });
+  $("#hostedShareDismiss")?.addEventListener("click", () => { dismissPendingHostedShare(); renderLibrary(); });
   $("#textShareImport")?.addEventListener("click", async () => {
     const btn = $("#textShareImport");
     const prev = btn.textContent;
@@ -721,32 +854,19 @@ function wireFriendBanner(){
     }
   });
   $("#textShareDismiss")?.addEventListener("click", () => { dismissPendingTextShare(); renderLibrary(); });
-  $("#friendImport")?.addEventListener("click", async () => {
-    const btn = $("#friendImport");
-    const prev = btn.textContent;
-    btn.textContent = "Importing…"; btn.disabled = true;
-    try{
-      const n = await importFromFriend();
-      toast(`Added ${n} book${n > 1 ? "s" : ""} from your friend`);
-      renderLibrary();
-    }catch(e){
-      toast(e?.message === "missing" ? "Link expired or not found" : "Import failed");
-      btn.textContent = prev; btn.disabled = false;
-    }
-  });
-  $("#friendDismiss")?.addEventListener("click", () => { dismissPendingFriend(); renderLibrary(); });
 }
 function openFriendImportSheet(){
   openSheet("Import shared shelf", `
     <p class="hint">Paste a <b>share link</b> or <b>share text</b> from a friend (includes comics).</p>
     <div class="field"><label for="friendLink">Share link, text, or code</label>
-      <input id="friendLink" placeholder="https://…?shelf=S1.… or paste S1.… text" inputmode="url" autocapitalize="off">
+      <input id="friendLink" placeholder="https://…?share=abc123 or ?shelf=S1.… or paste S1.… text" inputmode="url" autocapitalize="off">
     </div>
     <button class="btn green" id="friendGo">Import to my shelf</button>
     <p class="hint" style="margin-top:12px">Or <button type="button" class="btn ghost" id="friendFile" style="width:auto;display:inline-flex;padding:8px 12px;margin-top:4px">import a .json backup file</button> instead.</p>
   `, body => {
-    const pending = getPendingTextShare() || getPendingFriendId();
-    if(getPendingTextShare()) body.querySelector("#friendLink").placeholder = "Tap Import on Library banner, or paste full share link/text here";
+    const pending = getPendingHostedShare() || getPendingTextShare();
+    if(getPendingHostedShare()) body.querySelector("#friendLink").placeholder = "Tap Import on Library banner, or paste full share link here";
+    else if(getPendingTextShare()) body.querySelector("#friendLink").placeholder = "Tap Import on Library banner, or paste full share link/text here";
     else if(pending) body.querySelector("#friendLink").value = pending;
     body.querySelector("#friendGo").onclick = async () => {
       const raw = body.querySelector("#friendLink").value.trim();
@@ -755,19 +875,21 @@ function openFriendImportSheet(){
       btn.textContent = "Importing…"; btn.disabled = true;
       try{
         let n;
-        if(parseTextShareCode(raw) || /^S[01]\./.test(raw)){
+        const hostedId = parseHostedShareId(raw);
+        if(hostedId){
+          n = await importFromHostedShare(hostedId);
+        }else if(parseTextShareCode(raw) || /^S[01]\./.test(raw)){
           n = await importFromTextShare(raw);
         }else{
-          const id = parseFriendId(raw);
-          if(!id){ toast("Paste a valid share link, S1.… text, or friend code"); btn.textContent = "Import to my shelf"; btn.disabled = false; return; }
-          try{ sessionStorage.setItem("shelfside.pendingFriend", id); }catch(e){}
-          n = await importFromFriend(id);
+          toast("Paste a valid share link (?share=…), S1.… text, or friend code");
+          btn.textContent = "Import to my shelf"; btn.disabled = false;
+          return;
         }
         closeSheet();
         toast(`Added ${n} book${n > 1 ? "s" : ""} to your shelf`);
         switchTab("library");
       }catch(e){
-        toast(e?.message === "missing" ? "Link expired or not found" : e?.message === "legacy" ? "Old Netlify friend code — ask for a share link or text" : e?.message === "badcode" ? "Invalid share text" : "Import failed");
+        toast(e?.message === "missing" ? "Link expired or not found" : e?.message === "badcode" ? "Invalid share text" : "Import failed");
         btn.textContent = "Import to my shelf"; btn.disabled = false;
       }
     };
@@ -835,7 +957,7 @@ function htmlToText(html){
   const text = (doc.body?.innerText || doc.documentElement.textContent || "");
   return text.replace(/\n{3,}/g, "\n\n").trim();
 }
-const APP_VERSION = "2.17.1";
+const APP_VERSION = "2.18.0";
 const MAX_COMIC_PAGES = 1000;
 const DB_NAME = "shelfside";
 const DB_VERSION = 1;
@@ -2657,7 +2779,7 @@ async function renderSettings(){
     </section>
     <section class="card"><div class="card-head"><h2>Share shelf</h2></div>
       <div style="padding:14px 16px">
-        <p class="settings-note">Send a <b>share link</b> or <b>share text</b> with text books and comic images. Friend taps the link → Import.</p>
+        <p class="settings-note">Small shelves: instant <b>share link</b> or text. Large shelves &amp; comics: hosted download link (7 days). Friend taps link → Import.</p>
         <button class="btn green" id="shareTextLib" style="margin-top:12px">Share shelf</button>
         <button class="btn ghost" id="receiveLib" style="margin-top:10px">Import shared shelf</button>
       </div>
@@ -2946,7 +3068,7 @@ function switchTab(name){
 document.querySelectorAll("nav [data-tab]").forEach(b => b.onclick = () => switchTab(b.dataset.tab));
 
 dbOpen().then(async () => {
-  captureFriendLink();
+  captureHostedShareLink();
   captureTextShareLink();
   noteLibraryOrigin();
   await ensurePersistentStorage();

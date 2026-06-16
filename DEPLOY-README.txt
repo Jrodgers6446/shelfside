@@ -16,4 +16,4 @@ Verify after deploy:
   Create tab → Shelfside v2.16.0
   Settings → Install app → Icons: ok
 
-Share shelf: use "Share as text" (works without any server storage).
+Share shelf: small shelves use inline link; large/comic shelves upload to /api/share-shelf (bind SHELFSIDE_SHARE KV — see CLOUDFLARE.txt).
