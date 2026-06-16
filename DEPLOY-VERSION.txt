@@ -1,4 +1,2 @@
-Shelfside v2.16.0
-Hosted on Cloudflare Pages
-Link import: /api/fetch-url
-Share: text/link (no server storage)
+Shelfside v2.17.0
+Comic URL import + image import fixes

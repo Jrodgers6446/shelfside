@@ -314,14 +314,21 @@ function guessImageType(name, type){
   const ext = String(name || "").split(".").pop().toLowerCase();
   return ({ png: "image/png", gif: "image/gif", webp: "image/webp", bmp: "image/bmp", avif: "image/avif" })[ext] || "image/jpeg";
 }
+function comicBytesFromRaw(raw){
+  if(!raw) return null;
+  if(raw instanceof ArrayBuffer) return raw.byteLength ? raw.slice(0) : null;
+  if(ArrayBuffer.isView(raw)) return raw.byteLength
+    ? raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) : null;
+  if(typeof raw === "string"){ const b = b64ToBuf(raw); return b.byteLength ? b : null; }
+  return null;
+}
 async function normalizeComicPage(page){
   if(page?.data){
-    const buf = page.data instanceof ArrayBuffer ? page.data
-      : typeof page.data === "string" ? b64ToBuf(page.data) : null;
+    const buf = comicBytesFromRaw(page.data);
     if(buf?.byteLength) return { name: page.name || "page.jpg", type: guessImageType(page.name, page.type), data: buf };
   }
   if(page instanceof Blob){
-    const buf = await page.arrayBuffer();
+    const buf = (await page.arrayBuffer()).slice(0);
     if(!buf.byteLength) throw new Error("empty");
     return { name: page.name || "page.jpg", type: guessImageType(page.name, page.type), data: buf };
   }
@@ -336,9 +343,7 @@ async function normalizeComicPages(pages){
 }
 function pageToBlob(page){
   if(page instanceof Blob) return page.size ? page : null;
-  if(!page?.data) return null;
-  const buf = page.data instanceof ArrayBuffer ? page.data
-    : typeof page.data === "string" ? b64ToBuf(page.data) : null;
+  const buf = comicBytesFromRaw(page?.data);
   if(!buf?.byteLength) return null;
   return new Blob([buf], { type: guessImageType(page.name, page.type) });
 }
@@ -429,9 +434,12 @@ async function buildLibraryBackup(ids = null){
     if(meta.type === "comic"){
       const pages = [];
       for(const p of (c?.pages || [])){
-        let buf = p?.data instanceof ArrayBuffer ? p.data : null;
-        if(!buf?.byteLength && p instanceof Blob) buf = await p.arrayBuffer();
-        else if(!buf?.byteLength && typeof p?.data === "string") buf = b64ToBuf(p.data);
+        const buf = comicBytesFromRaw(p?.data);
+        if(p instanceof Blob && !buf?.byteLength){
+          const b = await p.arrayBuffer();
+          if(b?.byteLength) pages.push({ name: p.name || "page.jpg", type: guessImageType(p.name, p.type), data: bufToB64(b) });
+          continue;
+        }
         if(!buf?.byteLength) continue;
         pages.push({
           name: p.name || "page.jpg",
@@ -733,8 +741,8 @@ async function importLibraryBackup(file){
     if(meta.type === "comic"){
       const pages = [];
       for(const p of (item.pages || []).slice(0, MAX_COMIC_PAGES)){
-        const bytes = b64ToBuf(p.data);
-        if(!bytes.byteLength) continue;
+        const bytes = comicBytesFromRaw(p?.data);
+        if(!bytes?.byteLength) continue;
         pages.push({
           name: p.name || "page.jpg",
           type: guessImageType(p.name, p.type),
@@ -783,7 +791,7 @@ function htmlToText(html){
   const text = (doc.body?.innerText || doc.documentElement.textContent || "");
   return text.replace(/\n{3,}/g, "\n\n").trim();
 }
-const APP_VERSION = "2.16.0";
+const APP_VERSION = "2.17.0";
 const MAX_COMIC_PAGES = 1000;
 const DB_NAME = "shelfside";
 const DB_VERSION = 1;
@@ -889,7 +897,7 @@ document.addEventListener("click", e => {
   if(e.target.id === "backdrop" && e.target.classList.contains("open")) closeSheet();
 }, true);
 const IMPORT_ACCEPT = ".epub,.pdf,.html,.htm,.txt,.md,.text,.csv,.xml,.json,application/epub+zip,application/pdf,text/html,text/plain";
-const COMIC_ACCEPT = "image/*,.cbz,.zip,.pdf,application/zip,application/pdf,application/x-cbz";
+const COMIC_ACCEPT = "image/*,.heic,.heif,.cbz,.zip,.pdf,application/zip,application/pdf,application/x-cbz";
 const BOILERPLATE_RE = /\b(comment|comments|sidebar|sidenav|navbar|nav-menu|menu-bar|site-footer|page-footer|cookie|banner|advert|promo|related-stor|share-bar|social-share|newsletter|subscribe|breadcrumb|widget|toolbar|modal|popup|analytics|sponsor|tag-list|tag-cloud|metadata|author-box|user-tools|pager)\b/i;
 const STORY_HINT_RE = /article|chapter|story|content|entry|post|prose|fiction|novel|reader|text-body|main|book|paragraph|b-story-body|story-body|aa_ht|chapter-body|fiction-text|storytext/i;
 const FICTION_JUNK_RE = /^(share|tweet|facebook|instagram|subscribe|sign up|log in|cookie|advertisement|related stories|read more|comments?|posted on|filed under|tags?:|previous chapter|next chapter|table of contents|buy now|download app|skip to content|menu|search|home|about us|contact us|privacy policy|literotica live|cams|add to favorites|add to favourites|follow author|rate this story|report story|report|font size|page \d+ of \d+|\d+ comments?|\d+ favorites?|try the free literotica webcams!|models online now!|go to litwebcams|live webcams|\d+ stories|\d+ followers)$/i;
@@ -1113,12 +1121,11 @@ async function extractImagesFromPdf(file){
 }
 async function extractComicPagesFromFile(file){
   const name = file.name.toLowerCase();
-  if(file.type.startsWith("image/") || isComicImagePath(name)){
-    const type = guessImageType(name, file.type);
-    if(file.type === type && file.size) return [file];
-    const buf = await file.arrayBuffer();
+  if(file.type.startsWith("image/") || isComicImagePath(name) || /\.heic$/i.test(name) || /\.heif$/i.test(name)){
+    const type = guessImageType(name, file.type === "image/heic" || /\.heic$/i.test(name) ? "image/jpeg" : file.type);
+    const buf = (await file.arrayBuffer()).slice(0);
     if(!buf.byteLength) throw new Error("noimages");
-    return [new File([buf], file.name || "page.jpg", { type })];
+    return [{ name: file.name || "page.jpg", type, data: buf }];
   }
   if(name.endsWith(".cbz") || name.endsWith(".zip")) return extractImagesFromZip(await file.arrayBuffer());
   if(name.endsWith(".pdf") || file.type === "application/pdf") return extractImagesFromPdf(file);
@@ -1141,20 +1148,159 @@ function mergeComicPages(existing, incoming){
   const slice = incoming.slice(0, room);
   return { pages: existing.concat(slice), added: slice.length, capped: incoming.length > slice.length };
 }
-function wireComicImport(root, { inputSel, pickSel, infoSel, onReady, startPages = [] }){
+async function mergeComicPagesAsync(existing, incoming){
+  const ex = await normalizeComicPages(existing);
+  const inc = await normalizeComicPages(incoming);
+  return mergeComicPages(ex, inc);
+}
+function isDirectImageUrl(url){
+  return /\.(jpe?g|png|gif|webp|bmp|avif)(\?|#|$)/i.test(url);
+}
+function resolvePageUrl(href, base){
+  try{ return new URL(href, base).href; }catch(e){ return ""; }
+}
+const COMIC_IMG_SKIP_RE = /avatar|icon|logo|emoji|spacer|pixel\.gif|1x1|badge|button|sprite|banner|advert|ads?[-_/]|tracking|favicon|profile[-_]?pic/i;
+function comicImageUrlOk(url, el){
+  if(!url || COMIC_IMG_SKIP_RE.test(url)) return false;
+  if(isDirectImageUrl(url)) return true;
+  if(/\/(?:comics?|pages?|media|uploads?|images?|wp-content|manga|chapter)\//i.test(url)) return true;
+  const w = +(el?.getAttribute?.("width") || el?.getAttribute?.("data-width") || 0);
+  const h = +(el?.getAttribute?.("height") || el?.getAttribute?.("data-height") || 0);
+  if(w > 0 && w < 100 && h > 0 && h < 100) return false;
+  return !!(el && (el.closest?.("article,main,[class*='comic'],[class*='reader'],[class*='chapter'],[id*='comic']") || el.className?.match?.(/page|comic|chapter/i)));
+}
+function extractComicImageUrls(html, pageUrl){
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  stripWaybackChrome(doc);
+  const found = [];
+  const seen = new Set();
+  function add(raw, el){
+    const u = resolvePageUrl(raw, pageUrl);
+    if(!u || seen.has(u) || !comicImageUrlOk(u, el)) return;
+    seen.add(u);
+    found.push({ url: u, el });
+  }
+  doc.querySelectorAll("img[src], img[data-src], img[data-lazy-src], img[data-original]").forEach(img => {
+    add(img.getAttribute("data-src") || img.getAttribute("data-lazy-src") || img.getAttribute("data-original") || img.getAttribute("src"), img);
+    const srcset = img.getAttribute("srcset");
+    if(srcset){
+      const best = srcset.split(",").map(s => s.trim().split(/\s+/)[0]).filter(Boolean).pop();
+      if(best) add(best, img);
+    }
+  });
+  doc.querySelectorAll("a[href]").forEach(a => {
+    const h = a.getAttribute("href") || "";
+    if(isDirectImageUrl(h)) add(h, a);
+  });
+  doc.querySelectorAll("picture source[srcset], source[src]").forEach(s => {
+    const srcset = s.getAttribute("srcset") || s.getAttribute("src") || "";
+    const pick = srcset.split(",").map(x => x.trim().split(/\s+/)[0]).filter(Boolean).pop();
+    if(pick) add(pick, s.parentElement);
+  });
+  if(!found.length){
+    const og = doc.querySelector('meta[property="og:image"], meta[name="twitter:image"]')?.getAttribute("content");
+    if(og) add(og, null);
+  }
+  return found.map(f => f.url);
+}
+async function fetchImageBytes(url){
+  const enc = encodeURIComponent(url);
+  const attempts = [
+    `/api/fetch-url?url=${enc}&bin=1`,
+    `/api/fetch-url?url=${enc}`
+  ];
+  for(const proxy of attempts){
+    try{
+      const r = await fetch(proxy, { headers: { ...FETCH_HEADERS, Accept: "image/*,application/json,*/*" } });
+      if(!r.ok) continue;
+      const ct = (r.headers.get("content-type") || "").toLowerCase();
+      if(ct.includes("application/json")){
+        const j = await r.json();
+        if(j?.base64){
+          const bytes = b64ToBuf(j.base64);
+          if(bytes.byteLength > 80) return { bytes, type: j.type || guessImageType(url) };
+        }
+        continue;
+      }
+      if(ct.startsWith("image/") || ct.includes("octet-stream")){
+        const bytes = await r.arrayBuffer();
+        if(bytes.byteLength > 80) return { bytes, type: ct.split(";")[0] || guessImageType(url) };
+      }
+    }catch(e){}
+  }
+  throw new Error("fetch");
+}
+async function imageUrlToComicPage(url, index = 0){
+  const { bytes, type } = await fetchImageBytes(url);
+  const name = (url.split("/").pop() || "").split("?")[0] || `page-${String(index + 1).padStart(3, "0")}.jpg`;
+  return { name, type: guessImageType(name, type), data: bytes.slice(0) };
+}
+async function importComicPagesFromUrl(urlInput, existing = 0){
+  const pageUrl = normalizeUrl(urlInput);
+  const room = MAX_COMIC_PAGES - existing;
+  if(room <= 0) throw new Error("maxpages");
+  const urls = [];
+  if(isDirectImageUrl(pageUrl)) urls.push(pageUrl);
+  else{
+    const html = await fetchPageHtml(pageUrl);
+    urls.push(...extractComicImageUrls(html, pageUrl));
+  }
+  if(!urls.length) throw new Error("noimages");
+  const pages = [];
+  for(let i = 0; i < urls.length && pages.length < room; i++){
+    try{
+      pages.push(await imageUrlToComicPage(urls[i], pages.length));
+    }catch(e){}
+  }
+  if(!pages.length) throw new Error("fetch");
+  return pages;
+}
+function wireComicUrlImport(root, { inputSel, btnSel, infoSel, onPages, existing = 0 }){
+  const input = root.querySelector(inputSel);
+  const btn = root.querySelector(btnSel);
+  const info = infoSel ? root.querySelector(infoSel) : null;
+  btn.onclick = async () => {
+    const raw = input.value.trim();
+    if(!raw){ toast("Paste a link first"); return; }
+    const prev = btn.textContent;
+    btn.textContent = "Fetching…"; btn.disabled = true;
+    if(info) info.innerHTML = `<span class="spin"></span> Loading images from link…`;
+    try{
+      const pages = await importComicPagesFromUrl(raw, existing);
+      await onPages(pages, raw);
+      if(info) info.innerHTML = `Loaded <b>${pages.length}</b> image${pages.length === 1 ? "" : "s"} from link.`;
+      toast(`${pages.length} page${pages.length === 1 ? "" : "s"} loaded`);
+    }catch(err){
+      const msg = err?.message === "fetch" ? "Couldn't download images from that link"
+        : err?.message === "noimages" ? "No comic images found on that page — try a direct image URL or gallery page"
+        : err?.message === "maxpages" ? `Comic limit is ${MAX_COMIC_PAGES} pages` : "Link import failed";
+      if(info) info.textContent = msg;
+      toast(msg);
+    }finally{
+      btn.textContent = prev; btn.disabled = false;
+    }
+  };
+}
+function wireComicImport(root, { inputSel, pickSel, infoSel, onReady, state }){
+  const store = state || { pages: [] };
+  function getPending(){ return store.pages; }
+  function setPending(pages){
+    store.pages = pages;
+    onReady(pages);
+  }
   const fi = root.querySelector(inputSel);
   const pick = root.querySelector(pickSel);
   const info = infoSel ? root.querySelector(infoSel) : null;
-  let pending = startPages.slice(0, MAX_COMIC_PAGES);
   function showCount(extra){
     if(!info) return;
-    const left = MAX_COMIC_PAGES - pending.length;
+    const n = getPending().length;
+    const left = MAX_COMIC_PAGES - n;
     const cap = left <= 0 ? ` <b>Limit reached</b> (${MAX_COMIC_PAGES} pages max).` : left < MAX_COMIC_PAGES ? ` · room for <b>${left}</b> more` : "";
-    info.innerHTML = `<b>${pending.length}</b> / ${MAX_COMIC_PAGES} page${pending.length === 1 ? "" : "s"} ready${cap}${extra || ""}`;
+    info.innerHTML = `<b>${n}</b> / ${MAX_COMIC_PAGES} page${n === 1 ? "" : "s"} ready${cap}${extra || ""}`;
   }
   showCount();
   pick.onclick = () => {
-    if(pending.length >= MAX_COMIC_PAGES){ toast(`Comic limit is ${MAX_COMIC_PAGES} pages`); return; }
+    if(getPending().length >= MAX_COMIC_PAGES){ toast(`Comic limit is ${MAX_COMIC_PAGES} pages`); return; }
     fi.click();
   };
   fi.onchange = async () => {
@@ -1163,12 +1309,11 @@ function wireComicImport(root, { inputSel, pickSel, infoSel, onReady, startPages
     pick.textContent = "Reading…"; pick.disabled = true;
     if(info) info.innerHTML = `<span class="spin"></span> Extracting comic pages…`;
     try{
-      const batch = await extractComicPagesFromInput(fi.files, pending.length);
-      const merged = mergeComicPages(pending, batch);
-      pending = merged.pages;
-      onReady(pending);
+      const batch = await extractComicPagesFromInput(fi.files, getPending().length);
+      const merged = await mergeComicPagesAsync(getPending(), batch);
+      setPending(merged.pages);
       showCount(merged.capped ? ` — only ${merged.added} added (limit ${MAX_COMIC_PAGES})` : ` — ${[...fi.files].map(f => esc(f.name)).join(", ")}`);
-      toast(merged.capped ? `Added ${merged.added} pages (limit ${MAX_COMIC_PAGES})` : `${pending.length} pages ready`);
+      toast(merged.capped ? `Added ${merged.added} pages (limit ${MAX_COMIC_PAGES})` : `${merged.pages.length} pages ready`);
     }catch(err){
       if(err?.message === "maxpages"){
         if(info) info.innerHTML = `Already at the <b>${MAX_COMIC_PAGES}</b>-page limit.`;
@@ -1182,7 +1327,7 @@ function wireComicImport(root, { inputSel, pickSel, infoSel, onReady, startPages
       fi.value = "";
     }
   };
-  return () => pending;
+  return () => store.pages;
 }
 function normalizeUrl(input){
   let s = input.trim();
@@ -2204,7 +2349,12 @@ function bookOptions(id){
       const room = MAX_COMIC_PAGES - existing.length;
       if(room <= 0){ toast(`This comic already has ${MAX_COMIC_PAGES} pages`); return; }
       openSheet("Add pages · " + b.title, `
-        <p class="hint" style="margin:0 0 10px"><b>${existing.length}</b> pages now · up to <b>${MAX_COMIC_PAGES}</b> total. Pick files in batches if needed.</p>
+        <p class="hint" style="margin:0 0 10px"><b>${existing.length}</b> pages now · up to <b>${MAX_COMIC_PAGES}</b> total.</p>
+        <div class="field"><label for="aurlc">Web link</label>
+          <input type="url" id="aurlc" placeholder="https://… gallery or direct image URL" inputmode="url" autocapitalize="off">
+          <button class="btn ghost" id="afetchc" style="margin-top:8px">Fetch pages from link</button>
+          <p class="hint" id="aurlcInfo" style="margin-bottom:0">Webcomic chapter pages or direct image links.</p>
+        </div>
         <div class="file-area">
           <div class="file-label">Choose comic file or images</div>
           <button type="button" class="btn ghost" id="apickc">Choose file (images, CBZ, PDF…)</button>
@@ -2213,16 +2363,25 @@ function bookOptions(id){
         </div>
         <button class="btn green" id="apgoc">Save pages to comic</button>
       `, b2 => {
-        let pending = [];
+        const comicState = { pages: [] };
+        wireComicUrlImport(b2, {
+          inputSel: "#aurlc", btnSel: "#afetchc", infoSel: "#aurlcInfo", existing: existing.length,
+          onPages: async pages => {
+            const merged = await mergeComicPagesAsync(comicState.pages, pages);
+            comicState.pages = merged.pages;
+            const ap = b2.querySelector("#apicked");
+            if(ap) ap.innerHTML = `<b>${comicState.pages.length}</b> pages ready (link + files).`;
+          }
+        });
         wireComicImport(b2, {
-          inputSel: "#afc", pickSel: "#apickc", infoSel: "#apicked",
-          onReady: pages => { pending = pages; }
+          inputSel: "#afc", pickSel: "#apickc", infoSel: "#apicked", state: comicState,
+          onReady: () => {}
         });
         b2.querySelector("#apgoc").onclick = async () => {
-          if(!pending.length){ toast("Choose a comic file first"); return; }
+          if(!comicState.pages.length){ toast("Fetch from link or choose files first"); return; }
           const c = await dbGet("content", id);
-          const merged = mergeComicPages(c.pages || [], pending);
-          c.pages = await normalizeComicPages(merged.pages);
+          const merged = await mergeComicPagesAsync(c.pages || [], comicState.pages);
+          c.pages = merged.pages;
           if(!c.pages.length){ toast("No valid pages to save"); return; }
           await dbPut("content", c);
           b.pageCount = c.pages.length; await dbPut("books", b);
@@ -2371,7 +2530,7 @@ function renderCreate(){
         await saveTextBook({ title, author: body.querySelector("#ca").value.trim(), text, tags: body.querySelector("#ctags").value, folder: body.querySelector("#cfolder").value, source: "imported" });
       };
     } else {
-      let comicPages = [];
+      const comicState = { pages: [] };
       body.innerHTML = `
         <div class="field"><label for="kt">Title</label><input id="kt" placeholder="e.g. Issue #12"></div>
         <div class="field"><label for="kfolder">Folder (optional)</label>
@@ -2379,21 +2538,36 @@ function renderCreate(){
           <datalist id="comicFolderList">${collectAllFolders(books).map(f => `<option value="${esc(f)}">`).join("")}</datalist></div>
         <div class="field"><label for="ktags">Tags (optional)</label><input id="ktags" placeholder="comics, manga, favorites"></div>
         <div class="file-area">
-          <div class="file-label">Choose comic file or images</div>
+          <div class="file-label">Or import from a web link</div>
+          <input type="url" id="kurl" placeholder="https://… page with comic images, or direct .jpg/.png link" inputmode="url" autocapitalize="off">
+          <button type="button" class="btn ghost" id="kfetch" style="margin-top:8px">Fetch pages from link</button>
+          <p class="hint" id="kurlInfo" style="margin:8px 0 0">Gallery pages, webcomic chapters, or a direct image URL. Works on your Cloudflare deploy.</p>
+        </div>
+        <div class="file-area">
+          <div class="file-label">Or choose comic file or images</div>
           <button type="button" class="btn ghost" id="kpick">Choose file (images, CBZ, PDF…)</button>
           <input type="file" id="kf" accept="${COMIC_ACCEPT}" multiple style="display:none">
           <p class="hint" id="picked" style="margin:0">Upload page images, a <b>CBZ</b> file, or a <b>PDF</b> — up to <b>${MAX_COMIC_PAGES}</b> pages. Pick files in batches to add more.</p>
         </div>
         <button class="btn green" id="kgo">Add to shelf</button>`;
+      wireComicUrlImport(body, {
+        inputSel: "#kurl", btnSel: "#kfetch", infoSel: "#kurlInfo", existing: 0,
+        onPages: async pages => {
+          const merged = await mergeComicPagesAsync(comicState.pages, pages);
+          comicState.pages = merged.pages;
+          const picked = body.querySelector("#picked");
+          if(picked) picked.innerHTML = `<b>${comicState.pages.length}</b> / ${MAX_COMIC_PAGES} pages ready from link + files.`;
+        }
+      });
       wireComicImport(body, {
-        inputSel: "#kf", pickSel: "#kpick", infoSel: "#picked",
-        onReady: pages => { comicPages = pages; }
+        inputSel: "#kf", pickSel: "#kpick", infoSel: "#picked", state: comicState,
+        onReady: () => {}
       });
       body.querySelector("#kgo").onclick = async () => {
         const title = body.querySelector("#kt").value.trim();
         if(!title){ toast("Give it a title"); return; }
-        if(!comicPages.length){ toast("Choose a comic file first"); return; }
-        await saveComicBook({ title, pages: comicPages, tags: body.querySelector("#ktags").value, folder: body.querySelector("#kfolder").value, source: "upload" });
+        if(!comicState.pages.length){ toast("Fetch from link or choose files first"); return; }
+        await saveComicBook({ title, pages: comicState.pages, tags: body.querySelector("#ktags").value, folder: body.querySelector("#kfolder").value, source: "upload" });
       };
     }
   }

@@ -18,6 +18,14 @@ function blockedHost(hostname) {
   return false;
 }
 
+function bufToB64(buf) {
+  const bytes = new Uint8Array(buf);
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000)
+    s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
 export async function onRequest(context) {
   const { request } = context;
   if (request.method === "OPTIONS") {
@@ -27,7 +35,9 @@ export async function onRequest(context) {
     return new Response("Method not allowed", { status: 405, headers: corsHeaders() });
   }
 
-  const url = new URL(request.url).searchParams.get("url");
+  const reqUrl = new URL(request.url);
+  const url = reqUrl.searchParams.get("url");
+  const wantBin = reqUrl.searchParams.get("bin") === "1";
   if (!url) {
     return new Response("Missing url parameter", { status: 400, headers: corsHeaders() });
   }
@@ -47,19 +57,41 @@ export async function onRequest(context) {
   }
 
   try {
+    const accept = wantBin
+      ? "image/*,application/octet-stream,*/*"
+      : "text/html,text/plain,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
     const r = await fetch(target.href, {
       headers: {
         "User-Agent": UA,
-        Accept: "text/html,text/plain,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        Accept: accept,
         "Accept-Language": "en-US,en;q=0.9"
       },
       redirect: "follow"
     });
+    const ct = r.headers.get("content-type") || "";
+    const isImage = /^image\//i.test(ct);
+
+    if (wantBin || isImage) {
+      const buf = await r.arrayBuffer();
+      if (wantBin) {
+        return new Response(JSON.stringify({
+          base64: bufToB64(buf),
+          type: (ct.split(";")[0] || "application/octet-stream").trim()
+        }), {
+          status: r.ok ? 200 : Math.min(r.status, 599),
+          headers: { ...corsHeaders(), "Content-Type": "application/json" }
+        });
+      }
+      return new Response(buf, {
+        status: r.ok ? 200 : Math.min(r.status, 599),
+        headers: { ...corsHeaders(), "Content-Type": ct || "application/octet-stream" }
+      });
+    }
+
     const body = await r.text();
-    const ct = r.headers.get("content-type") || "text/html; charset=utf-8";
     return new Response(body, {
       status: r.ok ? 200 : Math.min(r.status, 599),
-      headers: { ...corsHeaders(), "Content-Type": ct }
+      headers: { ...corsHeaders(), "Content-Type": ct || "text/html; charset=utf-8" }
     });
   } catch {
     return new Response("Upstream fetch failed", { status: 502, headers: corsHeaders() });
