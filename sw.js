@@ -1,4 +1,4 @@
-const CACHE = "shelfside-v28";
+const CACHE = "shelfside-v30";
 const SHELL = [
   "./",
   "./index.html",

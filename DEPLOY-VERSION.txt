@@ -1,2 +1,2 @@
-Shelfside v2.18.0
-Hosted share links for large libraries (KV-backed, 7-day expiry)
+Shelfside v2.19.0
+Performance: lazy comic pages, small cover thumbs, faster library

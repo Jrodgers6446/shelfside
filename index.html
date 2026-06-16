@@ -153,7 +153,8 @@ nav button.active::after{content:"";width:18px;height:3px;background:var(--green
 .rtext p{margin-bottom:1.05em}
 .rtext p.speaking{background:var(--rd-hl);border-radius:4px;box-shadow:0 0 0 6px var(--rd-hl)}
 .rpages{max-width:760px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
-.rpages img{width:100%;border-radius:6px;background:#0003;display:block;min-height:120px}
+.rpage-slot{width:100%}
+.rpages img,.rpage-slot img{width:100%;border-radius:6px;background:#0003;display:block;min-height:120px}
 .rfoot{position:absolute;left:0;right:0;bottom:0;background:var(--rd-bg);border-top:1px solid var(--rd-line);
   padding:10px 16px calc(12px + env(safe-area-inset-bottom))}
 .rfoot-inner{max-width:620px;margin:0 auto}
@@ -347,14 +348,62 @@ function pageToBlob(page){
   if(!buf?.byteLength) return null;
   return new Blob([buf], { type: guessImageType(page.name, page.type) });
 }
-async function repairComicStorage(){
-  const all = await dbAll("content");
-  for(const c of all){
-    if(!c?.pages?.length) continue;
-    if(c.pages.every(p => p?.data?.byteLength > 0 && !(p instanceof Blob))) continue;
-    const normalized = await normalizeComicPages(c.pages);
-    if(normalized.length) await dbPut("content", { id: c.id, pages: normalized });
+async function makeComicCoverThumb(page){
+  const blob = pageToBlob(page);
+  if(!blob?.size) return "";
+  try{
+    const bmp = await createImageBitmap(blob, { resizeWidth: 96, resizeHeight: 144, resizeQuality: "medium" });
+    const canvas = document.createElement("canvas");
+    canvas.width = bmp.width;
+    canvas.height = bmp.height;
+    canvas.getContext("2d").drawImage(bmp, 0, 0);
+    bmp.close?.();
+    return canvas.toDataURL("image/jpeg", 0.68);
+  }catch(e){
+    if(blob.size < 48000){
+      try{
+        return await new Promise((res, rej) => {
+          const r = new FileReader();
+          r.onload = () => res(r.result);
+          r.onerror = rej;
+          r.readAsDataURL(blob);
+        });
+      }catch(e2){}
+    }
+    return "";
   }
+}
+let comicRepairRunning = false;
+async function repairComicStorageBackground(){
+  if(comicRepairRunning) return;
+  comicRepairRunning = true;
+  try{
+    const all = await dbAll("content");
+    const metaList = await dbAll("books");
+    const metaById = new Map(metaList.map(b => [b.id, b]));
+    for(const c of all){
+      if(!c?.pages?.length) continue;
+      const meta = metaById.get(c.id);
+      let normalized = null;
+      if(!c.pages.every(p => p?.data?.byteLength > 0 && !(p instanceof Blob))){
+        normalized = await normalizeComicPages(c.pages);
+        if(normalized.length) await dbPut("content", { id: c.id, pages: normalized });
+      }
+      if(meta?.type === "comic" && !meta.coverThumb){
+        const first = (normalized || c.pages)[0];
+        const thumb = await makeComicCoverThumb(first);
+        if(thumb){
+          meta.coverThumb = thumb;
+          await dbPut("books", meta);
+        }
+      }
+      await new Promise(r => setTimeout(r, 0));
+    }
+  }catch(e){}
+  comicRepairRunning = false;
+}
+async function repairComicStorage(){
+  return repairComicStorageBackground();
 }
 function safeFilename(name){
   return String(name || "book").replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "-").slice(0, 40) || "book";
@@ -427,8 +476,9 @@ async function buildShareData(ids = null){
   if(ids?.length) all = all.filter(b => ids.includes(b.id));
   const items = [];
   for(const meta of all){
+    await new Promise(r => setTimeout(r, 0));
     const c = await dbGet("content", meta.id);
-    const exportMeta = { ...meta, coverURL: undefined };
+    const exportMeta = { ...meta, coverURL: undefined, coverThumb: undefined };
     exportMeta.tags = bookTagList(exportMeta);
     exportMeta.folder = bookFolder(exportMeta);
     if(meta.type === "comic"){
@@ -618,34 +668,11 @@ function dismissPendingTextShare(){
   try{ sessionStorage.removeItem("shelfside.pendingTextShare"); }catch(e){}
 }
 async function sharePreviewThumbs(books){
-  const thumbs = [];
-  for(const item of books.slice(0, 12)){
-    try{
-      const meta = item.meta || item;
-      if(meta.type === "comic"){
-        const page = item.pages?.[0];
-        if(page?.data){
-          const bytes = typeof page.data === "string" ? b64ToBuf(page.data) : page.data;
-          if(bytes?.byteLength){
-            const blob = new Blob([bytes], { type: guessImageType(page.name, page.type) });
-            thumbs.push(`<img class="share-thumb" src="${URL.createObjectURL(blob)}" alt="">`);
-            continue;
-          }
-        }
-        if(meta.id){
-          const c = await dbGet("content", meta.id);
-          const b = c?.pages?.length ? pageToBlob(c.pages[0]) : null;
-          if(b){ thumbs.push(`<img class="share-thumb" src="${URL.createObjectURL(b)}" alt="">`); continue; }
-        }
-        thumbs.push(`<div class="share-thumb text-thumb" style="background:${coverColor(meta.title)}">Comic</div>`);
-      }else{
-        thumbs.push(`<div class="share-thumb text-thumb" style="background:${coverColor(meta.title)}">${esc(meta.title).slice(0, 24)}</div>`);
-      }
-    }catch(e){
-      thumbs.push(`<div class="share-thumb text-thumb" style="background:var(--slate)">?</div>`);
-    }
-  }
-  return thumbs.join("");
+  return books.slice(0, 8).map(item => {
+    const meta = item.meta || item;
+    const label = meta.type === "comic" ? "Comic" : esc(meta.title).slice(0, 20);
+    return `<div class="share-thumb text-thumb" style="background:${coverColor(meta.title)}">${label}</div>`;
+  }).join("");
 }
 async function shareLibraryHosted(data, count){
   const msg = `${count} book${count > 1 ? "s" : ""} from Shelfside — tap the link to add them to your shelf:`;
@@ -712,6 +739,7 @@ async function shareLibraryAsText(ids = null){
     const built = await buildShareData(ids);
     data = built.data;
     count = built.count;
+    await new Promise(r => setTimeout(r, 0));
     code = await encodeShelfShare(data);
     if(shelfNeedsHostedShare(data, code)) return shareLibraryHosted(data, count);
     linkOk = code.length <= MAX_SHARE_CODE_RAW;
@@ -833,13 +861,13 @@ function wireFriendBanner(){
     try{
       const n = await importFromHostedShare(getPendingHostedShare());
       toast(`Added ${n} book${n > 1 ? "s" : ""} to your shelf`);
-      renderLibrary();
+      renderLibrary({ reload: true });
     }catch(e){
       toast(e?.message === "missing" ? "Link expired or not found" : "Import failed");
       btn.textContent = prev; btn.disabled = false;
     }
   });
-  $("#hostedShareDismiss")?.addEventListener("click", () => { dismissPendingHostedShare(); renderLibrary(); });
+  $("#hostedShareDismiss")?.addEventListener("click", () => { dismissPendingHostedShare(); renderLibrary({ soft: true }); });
   $("#textShareImport")?.addEventListener("click", async () => {
     const btn = $("#textShareImport");
     const prev = btn.textContent;
@@ -847,13 +875,13 @@ function wireFriendBanner(){
     try{
       const n = await importFromTextShare(getPendingTextShare());
       toast(`Added ${n} book${n > 1 ? "s" : ""} to your shelf`);
-      renderLibrary();
+      renderLibrary({ reload: true });
     }catch(e){
       toast(e?.message === "badcode" ? "Invalid share text" : "Import failed");
       btn.textContent = prev; btn.disabled = false;
     }
   });
-  $("#textShareDismiss")?.addEventListener("click", () => { dismissPendingTextShare(); renderLibrary(); });
+  $("#textShareDismiss")?.addEventListener("click", () => { dismissPendingTextShare(); renderLibrary({ soft: true }); });
 }
 function openFriendImportSheet(){
   openSheet("Import shared shelf", `
@@ -902,7 +930,8 @@ async function importLibraryBackup(file){
   if(!Array.isArray(items) || !items.length) throw new Error("empty");
   let added = 0;
   for(const item of items){
-    const meta = { ...item.meta, id: uid(), coverURL: undefined, tags: bookTagList(item.meta), folder: bookFolder(item.meta) };
+    await new Promise(r => setTimeout(r, 0));
+    const meta = { ...item.meta, id: uid(), coverURL: undefined, coverThumb: undefined, tags: bookTagList(item.meta), folder: bookFolder(item.meta) };
     if(meta.folder) rememberFolder(meta.folder);
     if(meta.type === "comic"){
       const pages = [];
@@ -918,6 +947,8 @@ async function importLibraryBackup(file){
       if(!pages.length) continue;
       meta.pageCount = pages.length;
       meta.progress = meta.progress || { ratio: 0, pos: 0 };
+      const thumb = await makeComicCoverThumb(pages[0]);
+      if(thumb) meta.coverThumb = thumb;
       await dbPut("content", { id: meta.id, pages });
     }else{
       const text = (item.text || "").trim();
@@ -930,6 +961,7 @@ async function importLibraryBackup(file){
     added++;
   }
   if(!added) throw new Error("empty");
+  invalidateBooks();
   markHasBooks();
   await ensurePersistentStorage();
   return added;
@@ -957,7 +989,7 @@ function htmlToText(html){
   const text = (doc.body?.innerText || doc.documentElement.textContent || "");
   return text.replace(/\n{3,}/g, "\n\n").trim();
 }
-const APP_VERSION = "2.18.0";
+const APP_VERSION = "2.19.0";
 const MAX_COMIC_PAGES = 1000;
 const DB_NAME = "shelfside";
 const DB_VERSION = 1;
@@ -1228,6 +1260,7 @@ async function saveTextBook({ title, author, text, source, tags, folder }){
   await dbPut("content", { id, text });
   await dbPut("books", { id, type: "text", title, author: author || "", tags: parseTags(tags), folder: f,
     source: source || "imported", length: text.length, created: Date.now(), progress: { ratio: 0, pos: 0 } });
+  invalidateBooks();
   markHasBooks();
   await ensurePersistentStorage();
   toast("Added to shelf");
@@ -1239,9 +1272,11 @@ async function saveComicBook({ title, pages, source, tags, folder }){
   if(!pages.length){ toast("No valid comic pages"); return; }
   const f = normalizeFolderName(folder);
   if(f) rememberFolder(f);
+  const thumb = await makeComicCoverThumb(pages[0]);
   await dbPut("content", { id, pages });
   await dbPut("books", { id, type: "comic", title, author: "", tags: parseTags(tags), folder: f, source: source || "images",
-    pageCount: pages.length, created: Date.now(), progress: { ratio: 0, pos: 0 } });
+    pageCount: pages.length, coverThumb: thumb || undefined, created: Date.now(), progress: { ratio: 0, pos: 0 } });
+  invalidateBooks();
   markHasBooks();
   await ensurePersistentStorage();
   toast("Comic saved");
@@ -2179,14 +2214,21 @@ function wireFileImport(root, { inputSel, pickSel, infoSel, onImported }){
 let books = [];      // metadata list
 let libraryTagFilter = prefs.libraryTag || "";
 let libraryFolderFilter = prefs.libraryFolder || "";
-let libraryCoverURLs = [];
-function revokeLibraryCovers(){
-  libraryCoverURLs.forEach(u => { try{ URL.revokeObjectURL(u); }catch(e){} });
-  libraryCoverURLs = [];
-  books.forEach(b => { delete b.coverURL; });
+function invalidateBooks(){ books = []; }
+async function loadBooks(){
+  if(!books.length) books = (await dbAll("books")).sort((a, b) => (b.lastOpened || b.created) - (a.lastOpened || a.created));
+  return books;
 }
-let currentBook = null, paragraphs = [], pageURLs = [], renderedUpto = 0;
+let currentBook = null, paragraphs = [], pageURLs = new Map(), comicPagesData = [], comicPageObserver = null, renderedUpto = 0;
 const CHUNK = 150;
+const COMIC_PAGE_ROOT_MARGIN = "500px";
+function revokeComicPageURLs(){
+  pageURLs.forEach(u => { try{ URL.revokeObjectURL(u); }catch(e){} });
+  pageURLs = new Map();
+  comicPageObserver?.disconnect();
+  comicPageObserver = null;
+  comicPagesData = [];
+}
 function setLibraryTagFilter(tag){
   libraryTagFilter = tag || "";
   prefs.libraryTag = libraryTagFilter;
@@ -2265,23 +2307,79 @@ function openLibraryOrganizer(){
       if(!folder){ toast("Enter a folder name"); return; }
       const n = await assignBooksToFolder([...selected], folder);
       selected.clear(); selectMode = false;
-      books = (await dbAll("books")).sort((a, b) => (b.lastOpened || b.created) - (a.lastOpened || a.created));
+      invalidateBooks();
       toast(`Moved ${n} to “${folder}”`);
       paint(root);
-      renderLibrary();
+      renderLibrary({ reload: true });
     });
     root.querySelector("#orgUnfile")?.addEventListener("click", async () => {
       if(!selected.size){ toast("Select stories first"); return; }
       const n = await assignBooksToFolder([...selected], "");
       selected.clear(); selectMode = false;
-      books = (await dbAll("books")).sort((a, b) => (b.lastOpened || b.created) - (a.lastOpened || a.created));
+      invalidateBooks();
       toast(`Removed ${n} from folders`);
       paint(root);
-      renderLibrary();
+      renderLibrary({ reload: true });
     });
     root.querySelector("#orgDone").onclick = () => closeSheet();
   }
   openSheet("Library organizer", `<div id="orgRoot"></div>`, body => paint(body.querySelector("#orgRoot")));
+}
+function openSharePicker(opts = {}){
+  const hasLibFilter = !!(libraryTagFilter || libraryFolderFilter);
+  let selected = new Set(opts.preselectIds || (hasLibFilter
+    ? books.filter(b => bookMatchesTag(b, libraryTagFilter) && bookMatchesFolder(b, libraryFolderFilter)).map(b => b.id)
+    : []));
+  let pickFolder = "";
+  function paint(root){
+    const list = books.filter(b => bookMatchesFolder(b, pickFolder === "__none__" ? "__none__" : pickFolder));
+    const folders = collectAllFolders(books);
+    const comics = [...selected].filter(id => books.find(b => b.id === id)?.type === "comic").length;
+    const texts = selected.size - comics;
+    root.innerHTML = `
+      <p class="hint" style="margin:0 0 10px">Pick which stories to share — smaller selections upload faster and are easier to send.</p>
+      <div class="chips" id="shareFolders">
+        <button class="chip ${!pickFolder ? "on" : ""}" data-f="">All stories</button>
+        <button class="chip ${pickFolder === "__none__" ? "on" : ""}" data-f="__none__">Unfiled</button>
+        ${folders.map(f => `<button class="chip ${pickFolder.toLowerCase() === f.toLowerCase() ? "on" : ""}" data-f="${esc(f)}">${esc(f)}</button>`).join("")}
+      </div>
+      <div class="org-actions">
+        <button class="btn ghost" id="shareAll" style="width:auto">Select all</button>
+        <button class="btn ghost" id="shareNone" style="width:auto">Clear</button>
+        <span class="hint" style="margin-left:auto;font-size:12px"><b id="shareSelCount">${selected.size}</b> selected${texts ? ` · ${texts} text` : ""}${comics ? ` · ${comics} comic${comics > 1 ? "s" : ""}` : ""}</span>
+      </div>
+      <div class="org-list">${list.map(b => `
+        <label class="org-row">
+          <input type="checkbox" data-pick="${b.id}" ${selected.has(b.id) ? "checked" : ""}>
+          <div class="grow">
+            <div class="t">${esc(b.title)}</div>
+            <div class="s">${b.type === "comic" ? `Comic · ${b.pageCount || "?"} pages` : "Text"}${bookFolder(b) ? " · 📁 " + esc(bookFolder(b)) : ""}</div>
+          </div>
+        </label>`).join("") || `<p class="hint" style="padding:16px 0">No stories on your shelf yet.</p>`}
+      </div>
+      <button class="btn green" id="shareGo" ${selected.size ? "" : "disabled"}>Share ${selected.size || ""} selected</button>
+      <button class="btn ghost" id="shareCancel" style="margin-top:8px">Cancel</button>`;
+    root.querySelectorAll("#shareFolders .chip").forEach(btn => {
+      btn.onclick = () => { pickFolder = btn.dataset.f || ""; paint(root); };
+    });
+    root.querySelector("#shareAll").onclick = () => { list.forEach(b => selected.add(b.id)); paint(root); };
+    root.querySelector("#shareNone").onclick = () => { selected.clear(); paint(root); };
+    root.querySelectorAll("[data-pick]").forEach(cb => {
+      cb.onchange = () => {
+        if(cb.checked) selected.add(cb.dataset.pick); else selected.delete(cb.dataset.pick);
+        paint(root);
+      };
+    });
+    root.querySelector("#shareGo").onclick = async () => {
+      if(!selected.size){ toast("Select at least one story"); return; }
+      const ids = [...selected];
+      closeSheet();
+      try{ await shareLibraryAsText(ids); }
+      catch(e){ toast(e?.message === "empty" ? "Nothing to share" : "Share failed"); }
+    };
+    root.querySelector("#shareCancel").onclick = () => closeSheet();
+  }
+  openSheet("Share stories", `<div id="sharePickRoot"></div>`, body => paint(body.querySelector("#sharePickRoot")));
 }
 function receiveSharedLibrary(){
   const fi = document.createElement("input");
@@ -2317,8 +2415,9 @@ function openSheet(title, html, onMount){
 }
 
 /* =================== LIBRARY =================== */
-async function renderLibrary(){
-  books = (await dbAll("books")).sort((a,b) => (b.lastOpened||b.created) - (a.lastOpened||a.created));
+async function renderLibrary(opts = {}){
+  if(opts.reload) invalidateBooks();
+  await loadBooks();
   if(!books.length){
     let restoreHint = "";
     try{
@@ -2343,7 +2442,6 @@ async function renderLibrary(){
     return;
   }
   markHasBooks();
-  revokeLibraryCovers();
   const allTags = collectAllTags(books);
   const allFolders = collectAllFolders(books);
   const shown = books.filter(b => bookMatchesTag(b, libraryTagFilter) && bookMatchesFolder(b, libraryFolderFilter));
@@ -2360,8 +2458,7 @@ async function renderLibrary(){
     ${friendBannerHtml()}
     <div class="lib-toolbar">
       <button class="btn ghost" id="libOrganize">Organize</button>
-      <button class="btn ghost" id="libShare">Share shelf</button>
-      <button class="btn ghost" id="libShareText">Share as text</button>
+      <button class="btn ghost" id="libShare">Share…</button>
       <button class="btn ghost" id="libReceive">Import shared shelf</button>
     </div>
     ${folderBar}
@@ -2369,8 +2466,8 @@ async function renderLibrary(){
     ${shown.length ? `<div class="shelf">${shown.map(b => {
     const pct = Math.round((b.progress?.ratio || 0) * 100);
     const tags = tagPillsHtml(b.tags) + folderPillHtml(b.folder);
-    const cover = b.type === "comic" && b.coverURL
-      ? `<div class="cover comic-cover"><img src="${b.coverURL}" alt=""><div class="shade"></div><div class="meta"><div class="ct" style="font-size:13px">${esc(b.title)}</div></div><div class="badge">Comic</div></div>`
+    const cover = b.type === "comic" && b.coverThumb
+      ? `<div class="cover comic-cover"><img src="${b.coverThumb}" alt="" loading="lazy" decoding="async"><div class="shade"></div><div class="meta"><div class="ct" style="font-size:13px">${esc(b.title)}</div></div><div class="badge">Comic</div></div>`
       : `<div class="cover" style="background:${coverColor(b.title)}">
            ${b.type === "comic" ? '<div class="badge">Comic</div>' : ''}
            <div class="ct">${esc(b.title)}</div><div class="ca">${esc(b.author || "")}</div></div>`;
@@ -2386,41 +2483,16 @@ async function renderLibrary(){
     </div>`; }).join("")}</div>` : `<div class="card"><div class="empty">No books match${libraryFolderFilter ? ` folder <b>${libraryFolderFilter === "__none__" ? "Unfiled" : esc(libraryFolderFilter)}</b>` : ""}${libraryTagFilter ? ` tag <b>${esc(libraryTagFilter)}</b>` : ""}. <button class="chip on" id="libClearFilters" style="margin-top:10px">Show all</button></div></div>`}`;
   wireFriendBanner();
   $("#libOrganize")?.addEventListener("click", openLibraryOrganizer);
-  $("#libShare")?.addEventListener("click", async () => {
-    try{ await shareLibraryBackup(); }catch(e){ toast(e?.message === "empty" ? "Nothing to share" : "Share failed"); }
-  });
-  $("#libShareText")?.addEventListener("click", async () => {
-    try{ await shareLibraryAsText(); }catch(e){ toast(e?.message === "empty" ? "Nothing to share" : "Share failed"); }
-  });
+  $("#libShare")?.addEventListener("click", () => openSharePicker());
   $("#libReceive")?.addEventListener("click", receiveFromFriend);
-  $("#libClearFilters")?.addEventListener("click", () => { setLibraryTagFilter(""); setLibraryFolderFilter(""); renderLibrary(); });
+  $("#libClearFilters")?.addEventListener("click", () => { setLibraryTagFilter(""); setLibraryFolderFilter(""); renderLibrary({ soft: true }); });
   view.querySelectorAll("#libTagFilter [data-tag]").forEach(btn => {
-    btn.onclick = () => { setLibraryTagFilter(btn.dataset.tag || ""); renderLibrary(); };
+    btn.onclick = () => { setLibraryTagFilter(btn.dataset.tag || ""); renderLibrary({ soft: true }); };
   });
   view.querySelectorAll("#libFolderFilter [data-folder]").forEach(btn => {
-    btn.onclick = () => { setLibraryFolderFilter(btn.dataset.folder || ""); renderLibrary(); };
+    btn.onclick = () => { setLibraryFolderFilter(btn.dataset.folder || ""); renderLibrary({ soft: true }); };
   });
 
-  // hydrate comic cover thumbnails lazily
-  for(const b of shown){
-    if(b.type === "comic" && !b.coverURL){
-      const c = await dbGet("content", b.id);
-      const blob = c?.pages?.length ? pageToBlob(c.pages[0]) : null;
-      if(blob){
-        b.coverURL = URL.createObjectURL(blob);
-        libraryCoverURLs.push(b.coverURL);
-      }
-    }
-  }
-  // re-render once covers resolved (cheap)
-  if(shown.some(b => b.type === "comic")) {
-    view.querySelectorAll(".cover").forEach((el, i) => {
-      const b = shown[i];
-      if(b?.type === "comic" && b.coverURL && !el.querySelector("img")){
-        el.outerHTML = `<div class="cover comic-cover"><img src="${b.coverURL}" alt=""><div class="shade"></div><div class="meta"><div class="ct" style="font-size:13px">${esc(b.title)}</div></div><div class="badge">Comic</div></div>`;
-      }
-    });
-  }
   view.querySelectorAll("[data-open]").forEach(el => el.onclick = () => openReader(el.dataset.open));
   view.querySelectorAll("[data-opts]").forEach(el => el.onclick = () => bookOptions(el.dataset.opts));
 }
@@ -2453,15 +2525,15 @@ function bookOptions(id){
       if(b.folder) rememberFolder(b.folder);
       b.tags = parseTags(body.querySelector("#otags").value);
       await dbPut("books", b);
-      closeSheet(); renderLibrary(); toast("Saved");
+      closeSheet(); invalidateBooks(); renderLibrary({ reload: true }); toast("Saved");
     };
     body.querySelector("#oShare").onclick = async () => {
       try{ await shareLibraryBackup([id]); }catch(e){ toast("Share failed"); }
     };
-    body.querySelector("#oReset").onclick = async () => { b.progress = { ratio: 0, pos: 0 }; await dbPut("books", b); closeSheet(); renderLibrary(); };
+    body.querySelector("#oReset").onclick = async () => { b.progress = { ratio: 0, pos: 0 }; await dbPut("books", b); closeSheet(); renderLibrary({ soft: true }); };
     body.querySelector("#oDelete").onclick = async () => {
       if(!confirm(`Delete "${b.title}"? This removes it from your device.`)) return;
-      await dbDel("books", id); await dbDel("content", id); closeSheet(); renderLibrary(); toast("Deleted");
+      await dbDel("books", id); await dbDel("content", id); invalidateBooks(); closeSheet(); renderLibrary({ reload: true }); toast("Deleted");
     };
     const ap = body.querySelector("#oAppend");
     if(ap) ap.onclick = () => openSheet("Add to " + b.title, `
@@ -2506,7 +2578,8 @@ function bookOptions(id){
           await dbPut("content", c);
           b.length = c.text.length; await dbPut("books", b);
           markHasBooks();
-          closeSheet(); renderLibrary(); toast("Chapters saved");
+          invalidateBooks();
+          closeSheet(); renderLibrary({ reload: true }); toast("Chapters saved");
         };
       });
     const pg = body.querySelector("#oPages");
@@ -2550,9 +2623,13 @@ function bookOptions(id){
           c.pages = merged.pages;
           if(!c.pages.length){ toast("No valid pages to save"); return; }
           await dbPut("content", c);
+          if(!b.coverThumb && c.pages[0]){
+            const thumb = await makeComicCoverThumb(c.pages[0]);
+            if(thumb){ b.coverThumb = thumb; }
+          }
           b.pageCount = c.pages.length; await dbPut("books", b);
-          markHasBooks();
-          closeSheet(); renderLibrary();
+          invalidateBooks();
+          closeSheet(); renderLibrary({ reload: true });
           toast(merged.capped ? `Added ${merged.added} pages (limit ${MAX_COMIC_PAGES})` : `Added ${merged.added} page${merged.added > 1 ? "s" : ""}`);
         };
       });
@@ -2622,6 +2699,7 @@ async function saveGutenberg(item, btn){
     await dbPut("content", { id, text });
     await dbPut("books", { id, type: "text", title: item.title, author: (item.authors[0]||{}).name || "",
       source: "gutenberg", length: text.length, created: Date.now(), progress: { ratio: 0, pos: 0 } });
+    invalidateBooks();
     markHasBooks();
     await ensurePersistentStorage();
     btn.textContent = "✓"; btn.style.color = "var(--green)";
@@ -2779,8 +2857,8 @@ async function renderSettings(){
     </section>
     <section class="card"><div class="card-head"><h2>Share shelf</h2></div>
       <div style="padding:14px 16px">
-        <p class="settings-note">Small shelves: instant <b>share link</b> or text. Large shelves &amp; comics: hosted download link (7 days). Friend taps link → Import.</p>
-        <button class="btn green" id="shareTextLib" style="margin-top:12px">Share shelf</button>
+        <p class="settings-note">Choose which stories to share. Small selections get instant links; comics &amp; large shelves use a hosted download link (7 days).</p>
+        <button class="btn green" id="shareTextLib" style="margin-top:12px">Share stories…</button>
         <button class="btn ghost" id="receiveLib" style="margin-top:10px">Import shared shelf</button>
       </div>
     </section>
@@ -2859,9 +2937,7 @@ async function renderSettings(){
     toast(ok ? "Library protected" : "Browser declined — try after installing the app");
     renderSettings();
   };
-  $("#shareTextLib").onclick = async () => {
-    try{ await shareLibraryAsText(); }catch(e){ toast(e?.message === "empty" ? "Nothing to share yet" : "Share failed"); }
-  };
+  $("#shareTextLib").onclick = () => openSharePicker();
   $("#receiveLib").onclick = receiveFromFriend;
   $("#exportLib").onclick = async () => {
     const n = (await dbAll("books")).length;
@@ -2900,7 +2976,7 @@ async function openReader(id){
   document.documentElement.style.setProperty("--rd-size", prefs.fontSize + "px");
   rBody.scrollTop = 0; rBody.innerHTML = "";
   ttsStop();
-  pageURLs.forEach(u => URL.revokeObjectURL(u)); pageURLs = [];
+  revokeComicPageURLs();
 
   if(b.type === "text"){
     $("#ttsRow").style.display = ""; $("#ttsMeta").style.display = "";
@@ -2919,26 +2995,52 @@ async function openReader(id){
   } else {
     $("#ttsRow").style.display = "none"; $("#ttsMeta").style.display = "none";
     paragraphs = [];
-    const wrap = document.createElement("div"); wrap.className = "rpages";
-    c.pages.forEach((page, i) => {
-      const blob = pageToBlob(page);
-      const img = document.createElement("img");
-      img.alt = `Page ${i+1}`;
-      img.loading = i < 4 ? "eager" : "lazy";
-      if(blob){
-        const url = URL.createObjectURL(blob);
-        pageURLs.push(url);
-        img.src = url;
-      }else{
-        img.alt = `Page ${i+1} (couldn't load)`;
-        img.style.minHeight = "120px";
-      }
-      wrap.appendChild(img);
+    comicPagesData = c.pages || [];
+    const wrap = document.createElement("div");
+    wrap.className = "rpages";
+    comicPagesData.forEach((page, i) => {
+      const slot = document.createElement("div");
+      slot.className = "rpage-slot";
+      slot.dataset.page = String(i);
+      slot.style.minHeight = "120px";
+      wrap.appendChild(slot);
     });
     rBody.appendChild(wrap);
+    function mountComicPage(slot, i){
+      if(slot.querySelector("img") || pageURLs.has(i)) return;
+      const blob = pageToBlob(comicPagesData[i]);
+      if(!blob) return;
+      const url = URL.createObjectURL(blob);
+      pageURLs.set(i, url);
+      const img = document.createElement("img");
+      img.alt = `Page ${i + 1}`;
+      img.loading = "lazy";
+      img.decoding = "async";
+      img.src = url;
+      slot.appendChild(img);
+    }
+    function unmountComicPage(slot, i){
+      const url = pageURLs.get(i);
+      if(!url) return;
+      URL.revokeObjectURL(url);
+      pageURLs.delete(i);
+      slot.innerHTML = "";
+    }
+    comicPageObserver = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        const i = +entry.target.dataset.page;
+        if(entry.isIntersecting) mountComicPage(entry.target, i);
+        else if(entry.intersectionRatio === 0) unmountComicPage(entry.target, i);
+      });
+    }, { root: rBody, rootMargin: COMIC_PAGE_ROOT_MARGIN });
+    wrap.querySelectorAll(".rpage-slot").forEach((slot, i) => {
+      if(i < 3) mountComicPage(slot, i);
+      comicPageObserver.observe(slot);
+    });
     requestAnimationFrame(() => {
       const target = Math.floor(b.progress?.pos || 0);
-      if(wrap.children[target]) wrap.children[target].scrollIntoView();
+      const slot = wrap.children[target];
+      if(slot) slot.scrollIntoView();
       updateProgressUI();
     });
   }
@@ -2989,7 +3091,7 @@ async function saveProgress(){
   currentBook.progress = { pos: i, ratio: total > 1 ? i/(total-1) : 1 };
   await dbPut("books", currentBook);
 }
-$("#rBack").onclick = async () => { ttsStop(); await saveProgress(); reader.classList.remove("open"); currentBook = null; switchTab("library"); };
+$("#rBack").onclick = async () => { ttsStop(); revokeComicPageURLs(); await saveProgress(); reader.classList.remove("open"); currentBook = null; renderLibrary({ soft: true }); };
 $("#rFontUp").onclick = () => { prefs.fontSize = Math.min(26, prefs.fontSize+1); savePrefs(); document.documentElement.style.setProperty("--rd-size", prefs.fontSize+"px"); };
 $("#rFontDn").onclick = () => { prefs.fontSize = Math.max(13, prefs.fontSize-1); savePrefs(); document.documentElement.style.setProperty("--rd-size", prefs.fontSize+"px"); };
 $("#rTheme").onclick = () => { prefs.theme = prefs.theme === "light" ? "dark" : "light"; savePrefs(); reader.className = "reader open " + prefs.theme; };
@@ -3071,10 +3173,15 @@ dbOpen().then(async () => {
   captureHostedShareLink();
   captureTextShareLink();
   noteLibraryOrigin();
-  await ensurePersistentStorage();
-  await repairComicStorage();
+  ensurePersistentStorage();
   updateInstallBanner();
   switchTab("library");
+  const runRepair = () => repairComicStorageBackground().then(() => {
+    if(books.some(b => b.type === "comic" && !b.coverThumb)) invalidateBooks();
+    if(document.querySelector("#tabTitle")?.textContent === "Library") renderLibrary({ soft: true });
+  });
+  if(typeof requestIdleCallback === "function") requestIdleCallback(runRepair, { timeout: 8000 });
+  else setTimeout(runRepair, 1500);
 }).catch(() => {
   view.innerHTML = `<div class="card"><div class="empty">This browser blocked local storage (common in private browsing). Open Shelfside in a normal tab to use your library.</div></div>`;
 });
